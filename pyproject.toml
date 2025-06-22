@@ -1,11 +1,19 @@
 [project]
-name = "transcript-server"
-version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+name = "youtube-transcript-api-server"
+version = "1.0.0"
+description = "FastAPI server for YouTube transcript data"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115.13",
     "uvicorn>=0.34.3",
     "youtube-transcript-api>=1.1.0",
+    "slowapi>=0.1.9",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.1.0",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "httpx>=0.25.0",
 ]

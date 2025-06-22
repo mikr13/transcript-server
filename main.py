@@ -1,4 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     TranscriptsDisabled, 
@@ -8,11 +14,34 @@ from youtube_transcript_api._errors import (
     YouTubeRequestFailed
 )
 import uvicorn
-from typing import List, Dict, Any
-from pydantic import BaseModel
+import os
+from typing import List, Dict, Any, Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import Annotated
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Environment variables
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5678").split(",")
+
+# Rate limiter
+limiter = Limiter(key_func=get_remote_address)
 
 class VideoRequest(BaseModel):
-    id: str
+    # YouTube video IDs are exactly 11 characters, alphanumeric with hyphens and underscores
+    id: Annotated[str, Field(min_length=11, max_length=11, pattern=r"^[A-Za-z0-9_-]{11}$")]
+    
+    @field_validator('id')
+    @classmethod
+    def validate_video_id(cls, v):
+        # Additional validation for YouTube video ID format
+        if not v or len(v) != 11:
+            raise ValueError('Video ID must be exactly 11 characters')
+        return v
 
 class TranscriptSegment(BaseModel):
     text: str
@@ -22,36 +51,66 @@ class TranscriptSegment(BaseModel):
 
 class BatchResponseItem(BaseModel):
     success: bool
-    transcript: List[TranscriptSegment] = None
-    error: str = None
+    transcript: Optional[List[TranscriptSegment]] = None
+    error: Optional[str] = None
 
 app = FastAPI(
     title="YouTube Transcript API",
     description="A FastAPI server that fetches transcript data for YouTube videos",
-    version="1.0.0"
+    version="1.0.0",
+    redirect_slashes=False
+)
+
+# Rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Security middleware
+if not DEBUG:
+    # Force HTTPS in production
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+# Trusted hosts
+app.add_middleware(
+    TrustedHostMiddleware, 
+    allowed_hosts=ALLOWED_HOSTS + ["transcript." + host for host in ALLOWED_HOSTS if not host.startswith("localhost")]
+)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+    max_age=3600,
 )
 
 @app.get("/")
-async def root():
+@limiter.limit("30/minute")
+async def root(request: Request):
     """Root endpoint with API information"""
     return {
         "message": "YouTube Transcript API Server",
         "docs": "/docs",
-        "health": "/health"
+        "health": "/health",
+        "version": "1.0.0"
     }
 
 @app.get("/health")
-async def health_check():
+@limiter.limit("60/minute")
+async def health_check(request: Request):
     """Health check endpoint"""
-    return {"status": "healthy"}
+    return {"status": "healthy", "service": "youtube-transcript-api"}
 
 @app.get("/transcript/{video_id}")
-async def get_transcript(video_id: str) -> List[Dict[str, Any]]:
+@limiter.limit("100/minute")
+async def get_transcript(video_id: str, request: Request) -> List[Dict[str, Any]]:
     """
     Fetch transcript data for a YouTube video.
     
     Args:
-        video_id (str): The YouTube video ID (not the full URL)
+        video_id (str): The YouTube video ID (not the full URL) - must be exactly 11 characters
         
     Returns:
         List[Dict[str, Any]]: Raw transcript data with text, start time, and duration
@@ -73,14 +132,18 @@ async def get_transcript(video_id: str) -> List[Dict[str, Any]]:
             }
         ]
     """
+    # Validate video ID format
+    if not video_id or len(video_id) != 11:
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid video ID format. YouTube video IDs must be exactly 11 characters."
+        )
+    
     try:
-        # Initialize the YouTube Transcript API
+        print(f"Fetching transcript for video ID: {video_id}")
+
         ytt_api = YouTubeTranscriptApi()
-        
-        # Fetch the transcript
         fetched_transcript = ytt_api.fetch(video_id)
-        
-        # Convert to raw data format
         raw_transcript_data = fetched_transcript.to_raw_data()
         
         return raw_transcript_data
@@ -112,21 +175,31 @@ async def get_transcript(video_id: str) -> List[Dict[str, Any]]:
         )
 
 @app.get("/transcript/{video_id}/languages")
-async def get_available_languages(video_id: str):
+@limiter.limit("60/minute")
+async def get_available_languages(video_id: str, request: Request):
     """
     Get available transcript languages for a YouTube video.
     
     Args:
-        video_id (str): The YouTube video ID
+        video_id (str): The YouTube video ID - must be exactly 11 characters
         
     Returns:
         List of available transcript languages and metadata
     """
+    # Validate video ID format
+    if not video_id or len(video_id) != 11:
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid video ID format. YouTube video IDs must be exactly 11 characters."
+        )
+    
     try:
+        print(f"Fetching transcript languages for video ID: {video_id}")
+
         ytt_api = YouTubeTranscriptApi()
         transcript_list = ytt_api.list(video_id)
-        
         available_transcripts = []
+
         for transcript in transcript_list:
             available_transcripts.append({
                 "language": transcript.language,
@@ -152,12 +225,16 @@ async def get_available_languages(video_id: str):
         )
 
 @app.post("/transcript/batch")
-async def get_batch_transcript(video_requests: List[VideoRequest]) -> List[BatchResponseItem]:
+@limiter.limit("20/minute")
+async def get_batch_transcript(
+    video_requests: Annotated[List[VideoRequest], Field(min_length=1, max_length=10)],
+    request: Request
+) -> List[BatchResponseItem]:
     """
     Fetch transcripts for a batch of YouTube videos.
     
     Args:
-        video_requests (List[VideoRequest]): List of video requests with IDs
+        video_requests (List[VideoRequest]): List of video requests with IDs (max 10 videos)
         
     Returns:
         List[BatchResponseItem]: List of transcript results with success status
@@ -184,18 +261,18 @@ async def get_batch_transcript(video_requests: List[VideoRequest]) -> List[Batch
         ]
     """
     responses = []
+
+    print(f"Received batch request for {len(video_requests)} videos")
     
     for video_request in video_requests:
+    
         video_id = video_request.id
+
         try:
-            # Initialize the YouTube Transcript API
             ytt_api = YouTubeTranscriptApi()
-            
-            # Fetch the transcript
             fetched_transcript = ytt_api.fetch(video_id)
-            
-            # Convert to the requested format
             transcript_segments = []
+
             for segment in fetched_transcript:
                 transcript_segments.append({
                     "text": segment.text,
@@ -238,4 +315,9 @@ async def get_batch_transcript(video_requests: List[VideoRequest]) -> List[Batch
     return responses
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=int(os.getenv("PORT", "8000")),
+        log_level="info" if not DEBUG else "debug"
+    )

@@ -12,6 +12,7 @@ from youtube_transcript_api._errors import (
     RequestBlocked,
     YouTubeRequestFailed
 )
+from youtube_transcript_api.proxies import WebshareProxyConfig
 import uvicorn
 import os
 from typing import List, Dict, Any, Optional

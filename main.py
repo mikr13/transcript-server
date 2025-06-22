@@ -26,9 +26,22 @@ load_dotenv()
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5678").split(",")
+PROXY_USERNAME= os.getenv("PROXY_USERNAME", "")
+PROXY_PASSWORD = os.getenv("PROXY_PASSWORD", "")
 
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address)
+
+if not DEBUG:
+    ytt_api = YouTubeTranscriptApi(
+        proxy_config=WebshareProxyConfig(
+            proxy_username=PROXY_USERNAME,
+            proxy_password=PROXY_PASSWORD,
+        )
+    )
+else:
+    ytt_api = YouTubeTranscriptApi()
+
 
 class VideoRequest(BaseModel):
     # YouTube video IDs are exactly 11 characters, alphanumeric with hyphens and underscores
@@ -136,7 +149,6 @@ async def get_transcript(video_id: str, request: Request) -> List[Dict[str, Any]
     try:
         print(f"Fetching transcript for video ID: {video_id}")
 
-        ytt_api = YouTubeTranscriptApi()
         fetched_transcript = ytt_api.fetch(video_id)
         raw_transcript_data = fetched_transcript.to_raw_data()
         
@@ -190,7 +202,6 @@ async def get_available_languages(video_id: str, request: Request):
     try:
         print(f"Fetching transcript languages for video ID: {video_id}")
 
-        ytt_api = YouTubeTranscriptApi()
         transcript_list = ytt_api.list(video_id)
         available_transcripts = []
 
@@ -263,7 +274,6 @@ async def get_batch_transcript(
         video_id = video_request.id
 
         try:
-            ytt_api = YouTubeTranscriptApi()
             fetched_transcript = ytt_api.fetch(video_id)
             transcript_segments = []
 

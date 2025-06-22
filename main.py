@@ -19,6 +19,8 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field, field_validator
 from typing import Annotated
 from dotenv import load_dotenv
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 # Load environment variables from .env file
 load_dotenv()
@@ -43,6 +45,8 @@ if not DEBUG:
 else:
     ytt_api = YouTubeTranscriptApi()
 
+# Create a global executor (reuse for all requests)
+executor = ThreadPoolExecutor(max_workers=4)
 
 class VideoRequest(BaseModel):
     # YouTube video IDs are exactly 11 characters, alphanumeric with hyphens and underscores
@@ -233,14 +237,14 @@ async def get_available_languages(video_id: str, request: Request):
 @app.post("/transcript/batch")
 @limiter.limit("20/minute")
 async def get_batch_transcript(
-    video_requests: Annotated[List[VideoRequest], Field(min_length=1, max_length=10)],
+    video_requests: Annotated[List[VideoRequest], Field(min_length=1, max_length=25)],
     request: Request
 ) -> List[BatchResponseItem]:
     """
     Fetch transcripts for a batch of YouTube videos.
     
     Args:
-        video_requests (List[VideoRequest]): List of video requests with IDs (max 10 videos)
+        video_requests (List[VideoRequest]): List of video requests with IDs (max 25 videos)
         
     Returns:
         List[BatchResponseItem]: List of transcript results with success status
@@ -269,15 +273,13 @@ async def get_batch_transcript(
     responses = []
 
     print(f"Received batch request for {len(video_requests)} videos")
-    
-    for video_request in video_requests:
-    
-        video_id = video_request.id
 
+    loop = asyncio.get_running_loop()
+
+    async def fetch_transcript(video_id):
         try:
-            fetched_transcript = ytt_api.fetch(video_id)
+            fetched_transcript = await loop.run_in_executor(executor, ytt_api.fetch, video_id)
             transcript_segments = []
-
             for segment in fetched_transcript:
                 transcript_segments.append({
                     "text": segment.text,
@@ -285,38 +287,38 @@ async def get_batch_transcript(
                     "offset": str(segment.start),
                     "lang": fetched_transcript.language_code
                 })
-            
-            responses.append({
+            return {
                 "success": True,
                 "transcript": transcript_segments
-            })
-            
+            }
         except VideoUnavailable:
-            responses.append({
+            return {
                 "success": False,
                 "error": f"Video with ID '{video_id}' is not available"
-            })
+            }
         except NoTranscriptFound:
-            responses.append({
+            return {
                 "success": False,
                 "error": f"No transcript found for video ID '{video_id}'"
-            })
+            }
         except TranscriptsDisabled:
-            responses.append({
+            return {
                 "success": False,
                 "error": f"Transcripts are disabled for video ID '{video_id}'"
-            })
+            }
         except RequestBlocked:
-            responses.append({
+            return {
                 "success": False,
                 "error": "Request blocked. Please try again later."
-            })
+            }
         except Exception as e:
-            responses.append({
+            return {
                 "success": False,
                 "error": f"An error occurred while fetching the transcript: {str(e)}"
-            })
-    
+            }
+
+    tasks = [fetch_transcript(video_request.id) for video_request in video_requests]
+    responses = await asyncio.gather(*tasks)
     return responses
 
 if __name__ == "__main__":

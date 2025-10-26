@@ -184,14 +184,14 @@ The API returns appropriate HTTP status codes:
 
 Use the YouTube video ID (not the full URL):
 
-- ✅ `dQw4w9WgXcQ` 
+- ✅ `dQw4w9WgXcQ`
 - ❌ `https://www.youtube.com/watch?v=dQw4w9WgXcQ`
 
 ## Development
 
 ### Project Structure
 
-```
+```sh
 transcript-server/
 ├── main.py              # FastAPI application
 ├── pyproject.toml       # Project configuration and dependencies
